@@ -1,0 +1,1174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>☕ 咖啡社团管理系统</title>
+
+<!-- React 18 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+<!-- Fonts -->
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+<style>
+/* ═══ RESET & BASE ═══ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; overflow: hidden; }
+body {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  background: #1a1410; color: #e8ddd0;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+input, select, textarea { font-family: inherit; }
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3a3028; border-radius: 3px; }
+
+/* ═══ ANIMATIONS ═══ */
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+.fade-in { animation: fadeIn 0.3s ease; }
+.slide-up { animation: slideUp 0.35s ease; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext } = React;
+
+/* ╔═══════════════════════════════════════════════════════════╗
+   ║  SECTION 1 — API 通信层                                   ║
+   ║  所有后端请求统一通过此模块，前端其他部分不直接 fetch       ║
+   ╚═══════════════════════════════════════════════════════════╝ */
+
+const API_BASE = "/api";
+
+const api = {
+  async _req(method, path, body) {
+    const opts = { method, headers: { "Content-Type": "application/json" } };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(API_BASE + path, opts);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `请求失败 ${res.status}`);
+    return data;
+  },
+  get:  (path)       => api._req("GET", path),
+  post: (path, body) => api._req("POST", path, body),
+  put:  (path, body) => api._req("PUT", path, body),
+  del:  (path)       => api._req("DELETE", path),
+
+  // ── Menu ──
+  getMaterials:  ()       => api.get("/menu/materials"),
+  createMaterial:(d)      => api.post("/menu/materials", d),
+  updateMaterial:(id, d)  => api.put(`/menu/materials/${id}`, d),
+  deleteMaterial:(id)     => api.del(`/menu/materials/${id}`),
+
+  getVariants:   (matId)  => api.get(`/menu/variants${matId ? '?material_id=' + matId : ''}`),
+  createVariant: (d)      => api.post("/menu/variants", d),
+  updateVariant: (id, d)  => api.put(`/menu/variants/${id}`, d),
+  deleteVariant: (id)     => api.del(`/menu/variants/${id}`),
+
+  getDrinks:     ()       => api.get("/menu/drinks"),
+  createDrink:   (d)      => api.post("/menu/drinks", d),
+  updateDrink:   (id, d)  => api.put(`/menu/drinks/${id}`, d),
+  deleteDrink:   (id)     => api.del(`/menu/drinks/${id}`),
+
+  // ── Staff ──
+  getOperators:  ()       => api.get("/staff/operators"),
+  createOperator:(d)      => api.post("/staff/operators", d),
+  updateOperator:(id, d)  => api.put(`/staff/operators/${id}`, d),
+  deleteOperator:(id)     => api.del(`/staff/operators/${id}`),
+
+  getNotes:      ()       => api.get("/staff/notes"),
+  createNote:    (d)      => api.post("/staff/notes", d),
+  updateNote:    (id, d)  => api.put(`/staff/notes/${id}`, d),
+  deleteNote:    (id)     => api.del(`/staff/notes/${id}`),
+
+  // ── Orders ──
+  createOrder:   (d)      => api.post("/orders", d),
+  getOrders:     (params) => api.get(`/orders?${new URLSearchParams(params)}`),
+
+  // ── Inventory ──
+  getStock:      ()       => api.get("/inventory/stock"),
+  restock:       (d)      => api.post("/inventory/restock", d),
+  getRecords:    ()       => api.get("/inventory/records"),
+  quickEdit:     (id, d)  => api.put(`/inventory/quick-edit/${id}`, d),
+
+  // ── Stats ──
+  getStats:      (params) => api.get(`/stats?${new URLSearchParams(params || {})}`),
+
+  // ── Archives ──
+  createArchive: (d)      => api.post("/archives", d),
+  getArchives:   ()       => api.get("/archives"),
+  getArchive:    (id)     => api.get(`/archives/${id}`),
+};
+
+
+/* ╔═══════════════════════════════════════════════════════════╗
+   ║  SECTION 2 — 样式常量 & 工具函数                          ║
+   ╚═══════════════════════════════════════════════════════════╝ */
+
+const C = {
+  bg: "#1a1410", card: "#241e18", hover: "#2e2620", active: "#3a3028",
+  border: "#3a3028", borderLight: "#4a4038",
+  text: "#e8ddd0", sub: "#a89880", muted: "#786858",
+  accent: "#c8956c", accentHover: "#d8a57c", accentDim: "rgba(200,149,108,0.15)",
+  sale: "#5c9e6f", saleDim: "rgba(92,158,111,0.15)",
+  internal: "#6888b8", internalDim: "rgba(104,136,184,0.15)",
+  danger: "#c86c6c", dangerDim: "rgba(200,108,108,0.15)",
+};
+
+const fmt = {
+  money: (n) => `¥${(n || 0).toFixed(2)}`,
+  date: (s) => { try { return new Date(s).toLocaleString("zh-CN", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" }); } catch { return s; } },
+  dateFull: (s) => { try { return new Date(s).toLocaleString("zh-CN"); } catch { return s; } },
+};
+
+
+/* ╔═══════════════════════════════════════════════════════════╗
+   ║  SECTION 3 — 通用 UI 组件                                 ║
+   ║  全局复用，遵循 DRY 原则                                   ║
+   ╚═══════════════════════════════════════════════════════════╝ */
+
+const btnBase = { border:"none", borderRadius:12, cursor:"pointer", fontFamily:"inherit", transition:"all 0.15s ease", userSelect:"none" };
+
+function Btn({ children, onClick, color=C.accent, size="md", full, disabled, style={} }) {
+  const [p, setP] = useState(false);
+  const sizes = { sm:{padding:"8px 16px",fontSize:13}, md:{padding:"14px 24px",fontSize:15}, lg:{padding:"20px 36px",fontSize:19}, xl:{padding:"28px 48px",fontSize:26} };
+  return (
+    <button onClick={disabled?undefined:onClick} onPointerDown={()=>!disabled&&setP(true)} onPointerUp={()=>setP(false)} onPointerLeave={()=>setP(false)}
+      style={{ ...btnBase, ...sizes[size], background: disabled?C.hover: p?C.accentHover:color, color:"#fff", fontWeight:600, opacity:disabled?0.4:1, width:full?"100%":undefined, ...style }}>
+      {children}
+    </button>
+  );
+}
+
+function Card({ children, style={}, onClick }) {
+  return <div onClick={onClick} style={{ background:C.card, borderRadius:16, border:`1px solid ${C.border}`, padding:20, cursor:onClick?"pointer":undefined, transition:"all 0.15s", ...style }}>{children}</div>;
+}
+
+function TopBar({ title, onBack, right }) {
+  return (
+    <div style={{ display:"flex", alignItems:"center", padding:"14px 20px", borderBottom:`1px solid ${C.border}`, background:C.bg, position:"sticky", top:0, zIndex:10 }}>
+      {onBack && <div onClick={onBack} style={{ ...btnBase, padding:"8px 14px", background:C.card, borderRadius:10, color:C.sub, fontSize:14, cursor:"pointer", marginRight:16, border:`1px solid ${C.border}` }}>← 返回</div>}
+      <div style={{ flex:1, fontSize:20, fontWeight:700, color:C.text }}>{title}</div>
+      {right}
+    </div>
+  );
+}
+
+function TabBar({ tabs, active, onChange }) {
+  return (
+    <div style={{ display:"flex", gap:4, padding:"10px 16px", overflowX:"auto", borderBottom:`1px solid ${C.border}` }}>
+      {tabs.map(t => (
+        <div key={t.id} onClick={()=>onChange(t.id)} style={{
+          ...btnBase, padding:"10px 16px", borderRadius:10, fontSize:13, fontWeight:600, cursor:"pointer", whiteSpace:"nowrap",
+          background: active===t.id ? C.accent : "transparent", color: active===t.id ? "#fff" : C.sub
+        }}>{t.label}</div>
+      ))}
+    </div>
+  );
+}
+
+function Input({ label, value, onChange, type="text", placeholder, style={} }) {
+  return (
+    <div style={{ marginBottom:14, ...style }}>
+      {label && <div style={{ fontSize:12, color:C.sub, marginBottom:6 }}>{label}</div>}
+      <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+        style={{ width:"100%", padding:"12px 16px", background:C.bg, border:`1px solid ${C.border}`, borderRadius:10, color:C.text, fontSize:15, outline:"none", boxSizing:"border-box" }} />
+    </div>
+  );
+}
+
+function Select({ label, value, onChange, children, style={} }) {
+  return (
+    <div style={{ marginBottom:14, ...style }}>
+      {label && <div style={{ fontSize:12, color:C.sub, marginBottom:6 }}>{label}</div>}
+      <select value={value} onChange={e=>onChange(e.target.value)}
+        style={{ width:"100%", padding:"12px 16px", background:C.bg, border:`1px solid ${C.border}`, borderRadius:10, color:C.text, fontSize:15, outline:"none" }}>
+        {children}
+      </select>
+    </div>
+  );
+}
+
+function Modal({ open, onClose, title, children }) {
+  if (!open) return null;
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.7)", zIndex:100, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }} onClick={onClose}>
+      <div className="slide-up" onClick={e=>e.stopPropagation()} style={{ background:C.card, borderRadius:20, border:`1px solid ${C.border}`, width:"100%", maxWidth:540, maxHeight:"85vh", overflow:"auto" }}>
+        <div style={{ padding:"18px 24px", borderBottom:`1px solid ${C.border}`, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <span style={{ fontSize:17, fontWeight:700, color:C.text }}>{title}</span>
+          <span onClick={onClose} style={{ cursor:"pointer", color:C.muted, fontSize:22, lineHeight:1 }}>✕</span>
+        </div>
+        <div style={{ padding:24 }}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function GridSelect({ items, selected, onSelect, columns=3, renderItem }) {
+  return (
+    <div style={{ display:"grid", gridTemplateColumns:`repeat(${columns}, 1fr)`, gap:12 }}>
+      {items.map(item => {
+        const isArr = Array.isArray(selected);
+        const active = isArr ? selected.includes(item.id) : selected === item.id;
+        return (
+          <div key={item.id} onClick={()=>onSelect(item.id)} style={{
+            ...btnBase, background: active?C.accentDim:C.card, border:`2px solid ${active?C.accent:C.border}`,
+            borderRadius:14, padding:"16px 12px", textAlign:"center", cursor:"pointer",
+            color: active?C.accent:C.text, fontSize:16, fontWeight: active?700:500,
+            minHeight:60, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:4,
+          }}>
+            {renderItem ? renderItem(item, active) : item.name || item.label}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Toast({ message, type="success" }) {
+  if (!message) return null;
+  return (
+    <div className="fade-in" style={{
+      position:"fixed", top:28, left:"50%", transform:"translateX(-50%)", zIndex:200,
+      background: type==="success"?C.sale:C.danger, color:"#fff", padding:"14px 32px", borderRadius:14,
+      fontSize:16, fontWeight:700, boxShadow:"0 8px 32px rgba(0,0,0,0.4)",
+    }}>{message}</div>
+  );
+}
+
+function Loading() {
+  return <div style={{ textAlign:"center", padding:60, color:C.muted }}><div style={{ fontSize:32, animation:"spin 1.5s linear infinite", marginBottom:12 }}>☕</div>加载中…</div>;
+}
+
+function Empty({ text="暂无数据" }) {
+  return <div style={{ textAlign:"center", padding:48, color:C.muted, fontSize:14 }}>{text}</div>;
+}
+
+
+/* ╔═══════════════════════════════════════════════════════════╗
+   ║  SECTION 4 — 下单流程 (售卖 & 内部消耗 共用)              ║
+   ╚═══════════════════════════════════════════════════════════╝ */
+
+function OrderFlow({ type, onBack }) {
+  const [step, setStep] = useState(0);
+  const [mode, setMode] = useState(null);
+  const [drinks, setDrinks]       = useState([]);
+  const [materials, setMaterials] = useState([]);
+  const [variants, setVariants]   = useState([]);
+  const [operators, setOperators] = useState([]);
+  const [notes, setNotes]         = useState([]);
+  const [loading, setLoading]     = useState(true);
+
+  // Order state
+  const [selectedDrink, setSelectedDrink] = useState(null);
+  const [items, setItems]                 = useState([]);
+  const [operatorId, setOperatorId]       = useState(null);
+  const [selectedNotes, setSelectedNotes] = useState([]);
+  const [customNote, setCustomNote]       = useState("");
+  const [toast, setToast]                 = useState(null);
+
+  // Custom input
+  const [cMatId, setCMatId]     = useState(null);
+  const [cVarId, setCVarId]     = useState(null);
+  const [cAmount, setCAmount]   = useState("");
+
+  const isSale = type === "sale";
+  const color  = isSale ? C.sale : C.internal;
+  const label  = isSale ? "售卖" : "内部消耗";
+
+  useEffect(() => {
+    Promise.all([api.getDrinks(), api.getMaterials(), api.getVariants(), api.getOperators(), api.getNotes()])
+      .then(([d, m, v, o, n]) => { setDrinks(d); setMaterials(m); setVariants(v); setOperators(o); setNotes(n); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const variantsOf = useCallback((matId) => variants.filter(v => v.material_id === matId), [variants]);
+  const findVar    = useCallback((vid) => variants.find(v => v.id === vid), [variants]);
+  const findMat    = useCallback((mid) => materials.find(m => m.id === mid), [materials]);
+  const findOp     = useCallback((oid) => operators.find(o => o.id === oid), [operators]);
+
+  const calcCost = (variant, amount) => variant ? (variant.price_per_kg / 1000) * amount : 0;
+  const totalCost = useMemo(() => items.reduce((s, i) => s + calcCost(findVar(i.variant_id), i.amount), 0), [items, findVar]);
+
+  const selectDrink = (drinkId) => {
+    const drink = drinks.find(d => d.id === drinkId);
+    if (!drink) return;
+    setSelectedDrink(drink);
+    const drinkItems = drink.recipe.map(r => ({
+      material_id: r.material_id, variant_id: r.default_variant_id, amount: r.amount,
+      material_name: r.material_name, variant_name: r.variant_name, unit: r.unit || "g",
+    }));
+    setItems(drinkItems);
+    setStep(2);
+  };
+
+  const addCustomItem = () => {
+    if (!cMatId || !cVarId || !cAmount || Number(cAmount) <= 0) return;
+    const mat = findMat(cMatId), v = findVar(cVarId);
+    setItems(p => [...p, { material_id: cMatId, variant_id: cVarId, amount: Number(cAmount), material_name: mat?.name, variant_name: v?.name, unit: v?.unit || "g" }]);
+    setCMatId(null); setCVarId(null); setCAmount("");
+  };
+
+  const updateItemVariant = (idx, vid) => {
+    const v = findVar(vid);
+    setItems(p => p.map((it, i) => i === idx ? { ...it, variant_id: vid, variant_name: v?.name, unit: v?.unit } : it));
+  };
+  const updateItemAmount = (idx, amount) => setItems(p => p.map((it, i) => i === idx ? { ...it, amount: Number(amount) || 0 } : it));
+  const removeItem = (idx) => setItems(p => p.filter((_, i) => i !== idx));
+  const toggleNote = (nid) => setSelectedNotes(p => p.includes(nid) ? p.filter(x => x !== nid) : [...p, nid]);
+
+  const handleSubmit = async () => {
+    try {
+      const noteLabels = selectedNotes.map(nid => notes.find(n => n.id === nid)?.label).filter(Boolean);
+      if (customNote.trim()) noteLabels.push(customNote.trim());
+      await api.createOrder({
+        type, mode, drink_id: selectedDrink?.id, drink_name: selectedDrink?.name, drink_price: selectedDrink?.price || 0,
+        operator_id: operatorId, operator_name: findOp(operatorId)?.name, notes: noteLabels, items,
+      });
+      setToast("✓ 记录成功！");
+      setTimeout(() => { setToast(null); onBack(); }, 1200);
+    } catch (e) {
+      setToast("✗ " + e.message);
+      setTimeout(() => setToast(null), 2000);
+    }
+  };
+
+  if (loading) return <><TopBar title={label} onBack={onBack} /><Loading /></>;
+
+  // ── Step 0: 选择模式 ──
+  if (step === 0) return (
+    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
+      <TopBar title={label} onBack={onBack} /><Toast message={toast} />
+      <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:24, padding:32 }}>
+        <div style={{ fontSize:14, color:C.sub }}>选择录入方式</div>
+        <Btn size="xl" color={color} full onClick={() => { setMode("drink"); setStep(1); }}>☕ 选择饮品</Btn>
+        <Btn size="xl" color={C.hover} full onClick={() => { setMode("custom"); setStep(1); }} style={{ border:`2px solid ${C.border}`, color:C.text }}>⚗ 自定义原材料</Btn>
+      </div>
+    </div>
+  );
+
+  // ── Step 1a: 选择饮品 ──
+  if (step === 1 && mode === "drink") return (
+    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
+      <TopBar title="选择饮品" onBack={() => setStep(0)} />
+      <div style={{ flex:1, padding:20, overflowY:"auto" }}>
+        <GridSelect items={drinks} selected={null} columns={3} onSelect={selectDrink}
+          renderItem={(d) => <><span style={{ fontSize:17 }}>{d.name}</span><span style={{ fontSize:12, color:C.sub }}>{fmt.money(d.price)}</span></>} />
+      </div>
+    </div>
+  );
+
+  // ── Step 1b: 自定义原材料 ──
+  if (step === 1 && mode === "custom") return (
+    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
+      <TopBar title="自定义原材料" onBack={() => setStep(0)} />
+      <div style={{ flex:1, padding:20, overflowY:"auto" }}>
+        {items.length > 0 && (
+          <Card style={{ marginBottom:16 }}>
+            <div style={{ fontSize:12, color:C.sub, marginBottom:10 }}>已添加：</div>
+            {items.map((it, i) => (
+              <div key={i} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"8px 0", borderBottom: i<items.length-1?`1px solid ${C.border}`:"none" }}>
+                <span style={{ color:C.text, fontSize:14 }}>{it.material_name} / {it.variant_name} — {it.amount}{it.unit}</span>
+                <span onClick={()=>removeItem(i)} style={{ color:C.danger, cursor:"pointer", padding:"4px 10px" }}>✕</span>
+              </div>
+            ))}
+          </Card>
+        )}
+        <div style={{ fontSize:13, color:C.sub, marginBottom:10 }}>选择原材料：</div>
+        <GridSelect items={materials} selected={cMatId} columns={3} onSelect={id => { setCMatId(id); setCVarId(null); }} />
+        {cMatId && <>
+          <div style={{ fontSize:13, color:C.sub, marginTop:16, marginBottom:10 }}>选择品类：</div>
+          <GridSelect items={variantsOf(cMatId)} selected={cVarId} columns={2} onSelect={setCVarId}
+            renderItem={v => <><span>{v.name}</span><span style={{ fontSize:11, color:C.sub }}>{fmt.money(v.price_per_kg)}/kg</span></>} />
+        </>}
+        {cVarId && (
+          <div style={{ marginTop:16, display:"flex", gap:12, alignItems:"flex-end" }}>
+            <Input label={`用量 (${findVar(cVarId)?.unit||"g"})`} type="number" value={cAmount} onChange={setCAmount} style={{ flex:1, marginBottom:0 }} />
+            <Btn color={color} onClick={addCustomItem} style={{ height:48 }}>添加</Btn>
+          </div>
+        )}
+        {items.length > 0 && <div style={{ marginTop:24 }}><Btn color={color} full size="lg" onClick={()=>setStep(3)}>下一步 → 操作人</Btn></div>}
+      </div>
+    </div>
+  );
+
+  // ── Step 2: 确认配方（饮品模式） ──
+  if (step === 2) return (
+    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
+      <TopBar title={`${selectedDrink?.name} — 确认配方`} onBack={() => { setStep(1); setItems([]); setSelectedDrink(null); }} />
+      <div style={{ flex:1, padding:20, overflowY:"auto" }}>
+        {items.map((it, idx) => {
+          const vs = variantsOf(it.material_id);
+          return (
+            <Card key={idx} style={{ marginBottom:14 }}>
+              <div style={{ fontSize:13, color:C.sub, marginBottom:10 }}>{it.material_name}</div>
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:12 }}>
+                {vs.map(v => (
+                  <div key={v.id} onClick={()=>updateItemVariant(idx, v.id)} style={{
+                    ...btnBase, padding:"10px 16px", borderRadius:10, cursor:"pointer", fontSize:13,
+                    background: it.variant_id===v.id?C.accentDim:C.bg, border:`1.5px solid ${it.variant_id===v.id?C.accent:C.border}`,
+                    color: it.variant_id===v.id?C.accent:C.text,
+                  }}>{v.name}</div>
+                ))}
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                <span style={{ color:C.sub, fontSize:12 }}>用量:</span>
+                <input type="number" value={it.amount} onChange={e=>updateItemAmount(idx, e.target.value)}
+                  style={{ width:80, padding:"8px 12px", background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:15, textAlign:"center" }} />
+                <span style={{ color:C.muted, fontSize:12 }}>{findVar(it.variant_id)?.unit||"g"}</span>
+              </div>
+            </Card>
+          );
+        })}
+        <Btn color={color} full size="lg" onClick={()=>setStep(3)}>下一步 → 操作人</Btn>
+      </div>
+    </div>
+  );
+
+  // ── Step 3: 选择操作人 ──
+  if (step === 3) return (
+    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
+      <TopBar title="选择操作人" onBack={()=>setStep(mode==="drink"?2:1)} />
+      <div style={{ flex:1, padding:20, display:"flex", flexDirection:"column" }}>
+        <GridSelect items={operators} selected={operatorId} columns={3} onSelect={setOperatorId}
+          renderItem={o => <span style={{ fontSize:19 }}>{o.name}</span>} />
+        {operatorId && <div style={{ marginTop:"auto", paddingTop:24 }}><Btn color={color} full size="lg" onClick={()=>setStep(4)}>下一步 → 备注</Btn></div>}
+      </div>
+    </div>
+  );
+
+  // ── Step 4: 备注 ──
+  if (step === 4) return (
+    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
+      <TopBar title="特殊备注（可选）" onBack={()=>setStep(3)} />
+      <div style={{ flex:1, padding:20 }}>
+        <GridSelect items={notes} selected={selectedNotes} columns={3} onSelect={toggleNote} />
+        <Input label="自定义备注" value={customNote} onChange={setCustomNote} placeholder="输入自定义备注…" style={{ marginTop:16 }} />
+        <div style={{ marginTop:24 }}><Btn color={color} full size="lg" onClick={()=>setStep(5)}>确认订单</Btn></div>
+      </div>
+    </div>
+  );
+
+  // ── Step 5: 确认提交 ──
+  return (
+    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
+      <TopBar title="确认提交" onBack={()=>setStep(4)} /><Toast message={toast} type={toast?.startsWith("✗")?"error":"success"} />
+      <div style={{ flex:1, padding:20, overflowY:"auto" }}>
+        <Card style={{ marginBottom:16 }}>
+          <Row label="类型" value={<span style={{ color:isSale?C.sale:C.internal, fontWeight:700 }}>{label}</span>} />
+          {selectedDrink && <Row label="饮品" value={`${selectedDrink.name}（${fmt.money(selectedDrink.price)}）`} />}
+          <Row label="操作人" value={findOp(operatorId)?.name} />
+          {(selectedNotes.length > 0 || customNote) && (
+            <Row label="备注" value={<span style={{ color:C.accent }}>{[...selectedNotes.map(nid=>notes.find(n=>n.id===nid)?.label), customNote].filter(Boolean).join("、")}</span>} />
+          )}
+        </Card>
+        <Card style={{ marginBottom:16 }}>
+          <div style={{ fontSize:13, color:C.sub, marginBottom:10 }}>原材料消耗明细</div>
+          {items.map((it, i) => (
+            <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom: i<items.length-1?`1px solid ${C.border}`:"none", fontSize:14 }}>
+              <span style={{ color:C.text }}>{it.material_name} / {it.variant_name}</span>
+              <span style={{ color:C.sub }}>{it.amount}{it.unit} ≈ {fmt.money(calcCost(findVar(it.variant_id), it.amount))}</span>
+            </div>
+          ))}
+          <div style={{ display:"flex", justifyContent:"space-between", marginTop:12, paddingTop:12, borderTop:`1px solid ${C.border}` }}>
+            <span style={{ fontWeight:700 }}>原材料成本</span>
+            <span style={{ color:C.accent, fontWeight:700, fontSize:18 }}>{fmt.money(totalCost)}</span>
+          </div>
+        </Card>
+        <Btn color={color} full size="lg" onClick={handleSubmit}>✓ 提交记录</Btn>
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, value }) {
+  return (
+    <div style={{ display:"flex", justifyContent:"space-between", marginBottom:10 }}>
+      <span style={{ color:C.sub, fontSize:14 }}>{label}</span>
+      <span style={{ color:C.text, fontWeight:600, fontSize:14 }}>{value}</span>
+    </div>
+  );
+}
+
+
+/* ╔═══════════════════════════════════════════════════════════╗
+   ║  SECTION 5 — 管理页面组件                                 ║
+   ╚═══════════════════════════════════════════════════════════╝ */
+
+// ── 5a: 数据统计 ──
+
+function Dashboard() {
+  const [range, setRange] = useState("today");
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const getParams = () => {
+    const today = new Date().toISOString().slice(0, 10);
+    if (range === "today") return { from: today, to: today };
+    const d = new Date();
+    if (range === "week") d.setDate(d.getDate() - 7);
+    else if (range === "month") d.setDate(d.getDate() - 30);
+    else return {};
+    return { from: d.toISOString().slice(0, 10), to: today };
+  };
+
+  useEffect(() => {
+    setLoading(true);
+    api.getStats(getParams()).then(setStats).finally(() => setLoading(false));
+  }, [range]);
+
+  const ranges = [{id:"today",label:"今日"},{id:"week",label:"近7天"},{id:"month",label:"近30天"},{id:"all",label:"全部"}];
+
+  if (loading || !stats) return <Loading />;
+  const s = stats.summary || {};
+
+  return (
+    <div className="fade-in" style={{ padding:20 }}>
+      <div style={{ display:"flex", gap:8, marginBottom:20 }}>
+        {ranges.map(r => (
+          <div key={r.id} onClick={()=>setRange(r.id)} style={{
+            ...btnBase, padding:"8px 18px", borderRadius:8, cursor:"pointer", fontSize:13, fontWeight:600,
+            background: range===r.id?C.accent:C.card, color: range===r.id?"#fff":C.sub, border:`1px solid ${range===r.id?C.accent:C.border}`,
+          }}>{r.label}</div>
+        ))}
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:16 }}>
+        <StatCard label="售出饮品" value={s.sale_count || 0} suffix=" 杯" color={C.sale} big />
+        <StatCard label="营业收入" value={fmt.money(s.total_revenue)} color={C.sale} big />
+        <StatCard label="销售成本" value={fmt.money(s.sale_cost)} color={C.accent} />
+        <StatCard label="内部消耗成本" value={fmt.money(s.internal_cost)} color={C.internal} />
+      </div>
+
+      <Card style={{ marginBottom:16, background:`linear-gradient(135deg, ${C.card}, #2a2218)` }}>
+        <div style={{ display:"flex", justifyContent:"space-between" }}>
+          <div>
+            <div style={{ fontSize:12, color:C.sub }}>毛利润</div>
+            <div style={{ fontSize:26, fontWeight:700, color: (s.total_revenue||0) - (s.sale_cost||0) >= 0 ? C.sale : C.danger }}>
+              {fmt.money((s.total_revenue||0) - (s.sale_cost||0))}
+            </div>
+          </div>
+          <div style={{ textAlign:"right" }}>
+            <div style={{ fontSize:12, color:C.sub }}>毛利率</div>
+            <div style={{ fontSize:26, fontWeight:700, color:C.accent }}>
+              {s.total_revenue > 0 ? (((s.total_revenue - s.sale_cost) / s.total_revenue) * 100).toFixed(1) : "0.0"}%
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      {stats.drink_ranking?.length > 0 && (
+        <Card style={{ marginBottom:16 }}>
+          <div style={{ fontSize:13, color:C.sub, marginBottom:12 }}>🏆 饮品销量排行</div>
+          {stats.drink_ranking.map((d, i) => (
+            <div key={d.drink_name} style={{ display:"flex", alignItems:"center", gap:12, padding:"8px 0", borderBottom: i<stats.drink_ranking.length-1?`1px solid ${C.border}`:"none" }}>
+              <span style={{ width:22, height:22, borderRadius:6, background: i===0?C.accent:C.hover, color: i===0?"#fff":C.sub, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700 }}>{i+1}</span>
+              <span style={{ flex:1, color:C.text, fontSize:14 }}>{d.drink_name}</span>
+              <span style={{ color:C.accent, fontWeight:700, fontSize:14 }}>{d.count} 杯</span>
+              <span style={{ color:C.sub, fontSize:12, width:70, textAlign:"right" }}>{fmt.money(d.revenue)}</span>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {stats.material_usage?.length > 0 && (
+        <Card>
+          <div style={{ fontSize:13, color:C.sub, marginBottom:12 }}>📦 原材料消耗明细</div>
+          <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr 1fr", gap:4, fontSize:12 }}>
+            <div style={{ color:C.muted, padding:4 }}>品类</div>
+            <div style={{ color:C.sale, padding:4, textAlign:"right" }}>外部销售</div>
+            <div style={{ color:C.internal, padding:4, textAlign:"right" }}>内部消耗</div>
+            {stats.material_usage.map(u => (
+              <React.Fragment key={u.material_name + u.variant_name}>
+                <div style={{ color:C.text, padding:4, borderTop:`1px solid ${C.border}`, fontSize:13 }}>{u.material_name}/{u.variant_name}</div>
+                <div style={{ padding:4, textAlign:"right", borderTop:`1px solid ${C.border}` }}>{(u.sale_usage||0).toFixed(1)}{u.unit}</div>
+                <div style={{ padding:4, textAlign:"right", borderTop:`1px solid ${C.border}` }}>{(u.internal_usage||0).toFixed(1)}{u.unit}</div>
+              </React.Fragment>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, suffix, color, big }) {
+  return (
+    <Card>
+      <div style={{ fontSize:12, color:C.sub }}>{label}</div>
+      <div style={{ fontSize: big?30:22, fontWeight:700, color }}>{value}{suffix && <span style={{ fontSize:15, color:C.sub }}>{suffix}</span>}</div>
+    </Card>
+  );
+}
+
+
+// ── 5b: 菜单管理 ──
+
+function MenuEditor() {
+  const [sub, setSub] = useState("drinks");
+  const [drinks, setDrinks]       = useState([]);
+  const [materials, setMaterials] = useState([]);
+  const [variants, setVariants]   = useState([]);
+  const [modal, setModal]         = useState(null);
+  const [form, setForm]           = useState({});
+  const [refresh, setRefresh]     = useState(0);
+
+  const reload = () => setRefresh(r => r + 1);
+
+  useEffect(() => {
+    Promise.all([api.getDrinks(), api.getMaterials(), api.getVariants()])
+      .then(([d, m, v]) => { setDrinks(d); setMaterials(m); setVariants(v); });
+  }, [refresh]);
+
+  // ── Drink helpers ──
+  const openDrinkForm = (d) => {
+    setForm(d ? { ...d, price: String(d.price) } : { name: "", price: "", recipe: [] });
+    setModal("drink");
+  };
+  const saveDrink = async () => {
+    const data = { ...form, price: Number(form.price), recipe: form.recipe || [] };
+    if (form.id) await api.updateDrink(form.id, data);
+    else await api.createDrink(data);
+    setModal(null); reload();
+  };
+  const addRecipeLine = () => setForm(f => ({ ...f, recipe: [...(f.recipe||[]), { material_id: materials[0]?.id, default_variant_id: null, amount: 0 }] }));
+  const updateRecipe = (idx, field, val) => setForm(f => ({ ...f, recipe: f.recipe.map((r, i) => i === idx ? { ...r, [field]: field === "amount" ? Number(val) : Number(val) } : r) }));
+  const removeRecipe = (idx) => setForm(f => ({ ...f, recipe: f.recipe.filter((_, i) => i !== idx) }));
+
+  // ── Material helpers ──
+  const openMatForm = (m) => { setForm(m || { name: "" }); setModal("material"); };
+  const saveMaterial = async () => {
+    if (form.id) await api.updateMaterial(form.id, form);
+    else await api.createMaterial(form);
+    setModal(null); reload();
+  };
+
+  // ── Variant helpers ──
+  const openVarForm = (v) => {
+    setForm(v ? { ...v, price_per_kg: String(v.price_per_kg) } : { name: "", material_id: materials[0]?.id, price_per_kg: "", unit: "g" });
+    setModal("variant");
+  };
+  const saveVariant = async () => {
+    const data = { ...form, price_per_kg: Number(form.price_per_kg) };
+    if (form.id) await api.updateVariant(form.id, data);
+    else await api.createVariant(data);
+    setModal(null); reload();
+  };
+
+  const tabs = [{id:"drinks",label:"饮品"},{id:"materials",label:"原材料"},{id:"variants",label:"原材料品类"}];
+
+  return (
+    <div>
+      <TabBar tabs={tabs} active={sub} onChange={setSub} />
+      <div style={{ padding:20 }}>
+        {/* Drinks */}
+        {sub === "drinks" && <>
+          <Btn color={C.accent} onClick={()=>openDrinkForm(null)} style={{ marginBottom:16 }}>+ 新增饮品</Btn>
+          {drinks.map(d => (
+            <Card key={d.id} style={{ marginBottom:10, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <div style={{ fontWeight:600, fontSize:15 }}>{d.name} <span style={{ color:C.accent, fontSize:13 }}>{fmt.money(d.price)}</span></div>
+                <div style={{ color:C.muted, fontSize:11, marginTop:4 }}>
+                  {(d.recipe||[]).map(r => `${r.material_name}(${r.variant_name||"?"} ${r.amount}${r.unit||"g"})`).join(" + ")}
+                </div>
+              </div>
+              <div style={{ display:"flex", gap:8 }}>
+                <Btn size="sm" color={C.hover} onClick={()=>openDrinkForm(d)} style={{ color:C.sub }}>编辑</Btn>
+                <Btn size="sm" color={C.dangerDim} onClick={async()=>{ await api.deleteDrink(d.id); reload(); }} style={{ color:C.danger }}>删除</Btn>
+              </div>
+            </Card>
+          ))}
+        </>}
+
+        {/* Materials */}
+        {sub === "materials" && <>
+          <Btn color={C.accent} onClick={()=>openMatForm(null)} style={{ marginBottom:16 }}>+ 新增原材料</Btn>
+          {materials.map(m => (
+            <Card key={m.id} style={{ marginBottom:10, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span style={{ fontWeight:600 }}>{m.name}</span>
+              <div style={{ display:"flex", gap:8 }}>
+                <Btn size="sm" color={C.hover} onClick={()=>openMatForm(m)} style={{ color:C.sub }}>编辑</Btn>
+                <Btn size="sm" color={C.dangerDim} onClick={async()=>{ await api.deleteMaterial(m.id); reload(); }} style={{ color:C.danger }}>删除</Btn>
+              </div>
+            </Card>
+          ))}
+        </>}
+
+        {/* Variants */}
+        {sub === "variants" && <>
+          <Btn color={C.accent} onClick={()=>openVarForm(null)} style={{ marginBottom:16 }}>+ 新增品类</Btn>
+          {materials.map(mat => {
+            const vs = variants.filter(v => v.material_id === mat.id);
+            if (vs.length === 0) return null;
+            return (
+              <div key={mat.id} style={{ marginBottom:20 }}>
+                <div style={{ color:C.sub, fontSize:13, fontWeight:600, marginBottom:8 }}>{mat.name}</div>
+                {vs.map(v => (
+                  <Card key={v.id} style={{ marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <div>
+                      <span style={{ fontWeight:600 }}>{v.name}</span>
+                      <span style={{ color:C.sub, fontSize:12, marginLeft:12 }}>{fmt.money(v.price_per_kg)}/kg</span>
+                      <span style={{ color:C.muted, fontSize:11, marginLeft:12 }}>库存:{(v.current_stock||0).toFixed(0)}{v.unit}</span>
+                    </div>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <Btn size="sm" color={C.hover} onClick={()=>openVarForm(v)} style={{ color:C.sub }}>编辑</Btn>
+                      <Btn size="sm" color={C.dangerDim} onClick={async()=>{ await api.deleteVariant(v.id); reload(); }} style={{ color:C.danger }}>删除</Btn>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            );
+          })}
+        </>}
+      </div>
+
+      {/* Drink Modal */}
+      <Modal open={modal==="drink"} onClose={()=>setModal(null)} title={form.id?"编辑饮品":"新增饮品"}>
+        <Input label="饮品名称" value={form.name||""} onChange={v=>setForm(f=>({...f,name:v}))} />
+        <Input label="售价（¥）" type="number" value={form.price||""} onChange={v=>setForm(f=>({...f,price:v}))} />
+        <div style={{ fontSize:13, color:C.sub, marginBottom:10 }}>配方：</div>
+        {(form.recipe||[]).map((r, idx) => (
+          <div key={idx} style={{ display:"flex", gap:8, marginBottom:10, alignItems:"center", flexWrap:"wrap" }}>
+            <select value={r.material_id||""} onChange={e=>{ updateRecipe(idx,"material_id",e.target.value); updateRecipe(idx,"default_variant_id",""); }}
+              style={{ flex:1, padding:10, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:13, minWidth:90 }}>
+              {materials.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+            <select value={r.default_variant_id||""} onChange={e=>updateRecipe(idx,"default_variant_id",e.target.value)}
+              style={{ flex:1, padding:10, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:13, minWidth:90 }}>
+              <option value="">选择品类</option>
+              {variants.filter(v=>v.material_id===r.material_id).map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+            </select>
+            <input type="number" value={r.amount} onChange={e=>updateRecipe(idx,"amount",e.target.value)} placeholder="用量"
+              style={{ width:65, padding:10, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:13, textAlign:"center" }} />
+            <span onClick={()=>removeRecipe(idx)} style={{ color:C.danger, cursor:"pointer", padding:4 }}>✕</span>
+          </div>
+        ))}
+        <Btn size="sm" color={C.hover} onClick={addRecipeLine} style={{ color:C.sub, border:`1px dashed ${C.border}`, marginBottom:16 }}>+ 添加原材料</Btn>
+        <Btn full color={C.accent} onClick={saveDrink}>保存</Btn>
+      </Modal>
+
+      {/* Material Modal */}
+      <Modal open={modal==="material"} onClose={()=>setModal(null)} title={form.id?"编辑原材料":"新增原材料"}>
+        <Input label="原材料名称" value={form.name||""} onChange={v=>setForm(f=>({...f,name:v}))} />
+        <Btn full color={C.accent} onClick={saveMaterial}>保存</Btn>
+      </Modal>
+
+      {/* Variant Modal */}
+      <Modal open={modal==="variant"} onClose={()=>setModal(null)} title={form.id?"编辑品类":"新增品类"}>
+        <Select label="所属原材料" value={form.material_id||""} onChange={v=>setForm(f=>({...f,material_id:Number(v)}))}>
+          {materials.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+        </Select>
+        <Input label="品类名称" value={form.name||""} onChange={v=>setForm(f=>({...f,name:v}))} />
+        <Input label="价格（¥/kg）" type="number" value={form.price_per_kg||""} onChange={v=>setForm(f=>({...f,price_per_kg:v}))} />
+        <Select label="计量单位" value={form.unit||"g"} onChange={v=>setForm(f=>({...f,unit:v}))}>
+          <option value="g">克 (g)</option>
+          <option value="ml">毫升 (ml)</option>
+        </Select>
+        <Btn full color={C.accent} onClick={saveVariant}>保存</Btn>
+      </Modal>
+    </div>
+  );
+}
+
+
+// ── 5c: 人员 & 备注管理 ──
+
+function StaffEditor() {
+  const [sub, setSub] = useState("operators");
+  const [items, setItems] = useState([]);
+  const [name, setName]   = useState("");
+  const [editing, setEditing] = useState(null);
+  const [refresh, setRefresh] = useState(0);
+
+  const isOp = sub === "operators";
+
+  useEffect(() => {
+    (isOp ? api.getOperators() : api.getNotes()).then(setItems);
+  }, [sub, refresh]);
+
+  const save = async () => {
+    if (!name.trim()) return;
+    const payload = isOp ? { name: name.trim() } : { label: name.trim() };
+    if (editing) {
+      isOp ? await api.updateOperator(editing, payload) : await api.updateNote(editing, payload);
+    } else {
+      isOp ? await api.createOperator(payload) : await api.createNote(payload);
+    }
+    setName(""); setEditing(null); setRefresh(r => r + 1);
+  };
+
+  const remove = async (id) => {
+    isOp ? await api.deleteOperator(id) : await api.deleteNote(id);
+    setRefresh(r => r + 1);
+  };
+
+  return (
+    <div>
+      <TabBar tabs={[{id:"operators",label:"操作人"},{id:"notes",label:"备注选项"}]} active={sub} onChange={s => { setSub(s); setEditing(null); setName(""); }} />
+      <div style={{ padding:20 }}>
+        <div style={{ display:"flex", gap:10, marginBottom:20 }}>
+          <Input value={name} onChange={setName} placeholder={`输入${isOp?"姓名":"备注标签"}…`} style={{ flex:1, marginBottom:0 }} />
+          <Btn color={C.accent} onClick={save}>{editing?"更新":"添加"}</Btn>
+          {editing && <Btn color={C.hover} onClick={()=>{ setEditing(null); setName(""); }} style={{ color:C.sub }}>取消</Btn>}
+        </div>
+        {items.map(item => (
+          <Card key={item.id} style={{ marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <span style={{ fontWeight:500, fontSize:15 }}>{item.name || item.label}</span>
+            <div style={{ display:"flex", gap:8 }}>
+              <Btn size="sm" color={C.hover} onClick={()=>{ setEditing(item.id); setName(item.name||item.label); }} style={{ color:C.sub }}>编辑</Btn>
+              <Btn size="sm" color={C.dangerDim} onClick={()=>remove(item.id)} style={{ color:C.danger }}>删除</Btn>
+            </div>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+// ── 5d: 库存管理 ──
+
+function InventoryManager() {
+  const [sub, setSub] = useState("stock");
+  const [stock, setStock]     = useState([]);
+  const [records, setRecords] = useState([]);
+  const [materials, setMaterials] = useState([]);
+  const [variants, setVariants]   = useState([]);
+  const [form, setForm]       = useState({ variant_id: "", quantity: "", unit_price: "" });
+  const [toast, setToast]     = useState(null);
+  const [refresh, setRefresh] = useState(0);
+
+  useEffect(() => {
+    Promise.all([api.getStock(), api.getRecords(), api.getMaterials(), api.getVariants()])
+      .then(([s, r, m, v]) => { setStock(s); setRecords(r); setMaterials(m); setVariants(v); });
+  }, [refresh]);
+
+  const handleRestock = async () => {
+    if (!form.variant_id || !form.quantity) return;
+    try {
+      await api.restock({ variant_id: Number(form.variant_id), quantity: Number(form.quantity), unit_price: Number(form.unit_price) || 0 });
+      setForm({ variant_id: "", quantity: "", unit_price: "" });
+      setToast("入库成功！"); setTimeout(() => setToast(null), 1500);
+      setRefresh(r => r + 1);
+    } catch (e) { setToast("错误：" + e.message); setTimeout(() => setToast(null), 2000); }
+  };
+
+  // Group stock by material
+  const grouped = useMemo(() => {
+    const map = {};
+    stock.forEach(v => {
+      if (!map[v.material_name]) map[v.material_name] = [];
+      map[v.material_name].push(v);
+    });
+    return map;
+  }, [stock]);
+
+  return (
+    <div>
+      <Toast message={toast} type={toast?.startsWith("错")?"error":"success"} />
+      <TabBar tabs={[{id:"stock",label:"当前库存"},{id:"add",label:"原材料入库"},{id:"log",label:"入库记录"}]} active={sub} onChange={setSub} />
+      <div style={{ padding:20 }}>
+        {sub === "stock" && Object.entries(grouped).map(([matName, vs]) => (
+          <div key={matName} style={{ marginBottom:20 }}>
+            <div style={{ color:C.sub, fontSize:13, fontWeight:600, marginBottom:8 }}>{matName}</div>
+            {vs.map(v => {
+              const pct = v.total_stocked > 0 ? (v.current_stock / v.total_stocked * 100) : 0;
+              const low = pct < 20 && v.total_stocked > 0;
+              return (
+                <Card key={v.id} style={{ marginBottom:8 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}>
+                    <span style={{ fontWeight:600, fontSize:14 }}>{v.name}</span>
+                    <span style={{ color:low?C.danger:C.text, fontWeight:700 }}>{(v.current_stock||0).toFixed(0)} {v.unit}</span>
+                  </div>
+                  <div style={{ height:5, background:C.bg, borderRadius:3, overflow:"hidden" }}>
+                    <div style={{ height:"100%", width:`${Math.min(pct,100)}%`, background:low?C.danger:C.sale, borderRadius:3, transition:"width 0.3s" }} />
+                  </div>
+                  {low && <div style={{ fontSize:11, color:C.danger, marginTop:4 }}>⚠ 库存不足</div>}
+                </Card>
+              );
+            })}
+          </div>
+        ))}
+
+        {sub === "add" && (
+          <Card>
+            <Select label="选择原材料品类" value={form.variant_id} onChange={v => setForm(f => ({ ...f, variant_id: v }))}>
+              <option value="">请选择…</option>
+              {materials.map(m => (
+                <optgroup key={m.id} label={m.name}>
+                  {variants.filter(v => v.material_id === m.id).map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                </optgroup>
+              ))}
+            </Select>
+            <Input label="入库数量" type="number" value={form.quantity} onChange={v => setForm(f => ({ ...f, quantity: v }))} />
+            <Input label="采购单价（¥，可选）" type="number" value={form.unit_price} onChange={v => setForm(f => ({ ...f, unit_price: v }))} />
+            <Btn full color={C.accent} onClick={handleRestock} disabled={!form.variant_id || !form.quantity}>确认入库</Btn>
+          </Card>
+        )}
+
+        {sub === "log" && <>
+          {records.length === 0 ? <Empty text="暂无入库记录" /> : records.map(r => (
+            <Card key={r.id} style={{ marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <div style={{ fontWeight:500, fontSize:14 }}>{r.material_name} / {r.variant_name}</div>
+                <div style={{ color:C.muted, fontSize:11 }}>{fmt.dateFull(r.created_at)}</div>
+              </div>
+              <div style={{ textAlign:"right" }}>
+                <div style={{ color:C.sale, fontWeight:700 }}>+{r.quantity}</div>
+                {r.unit_price > 0 && <div style={{ color:C.sub, fontSize:11 }}>{fmt.money(r.unit_price)}</div>}
+              </div>
+            </Card>
+          ))}
+        </>}
+      </div>
+    </div>
+  );
+}
+
+
+// ── 5e: 查库（快速编辑） ──
+
+function CheckInventory() {
+  const [stock, setStock] = useState([]);
+  const [search, setSearch] = useState("");
+  const [editId, setEditId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [refresh, setRefresh] = useState(0);
+
+  useEffect(() => { api.getStock().then(setStock); }, [refresh]);
+
+  const filtered = useMemo(() => stock.filter(v => !search || v.name.includes(search) || v.material_name.includes(search)), [stock, search]);
+
+  const saveEdit = async (id) => {
+    await api.quickEdit(id, {
+      name: editForm.name,
+      price_per_kg: Number(editForm.price_per_kg),
+      current_stock: Number(editForm.current_stock),
+    });
+    setEditId(null);
+    setRefresh(r => r + 1);
+  };
+
+  return (
+    <div style={{ padding:20 }}>
+      <Input value={search} onChange={setSearch} placeholder="🔍 搜索原材料品类…" style={{ marginBottom:16 }} />
+      {filtered.map(v => (
+        <Card key={v.id} style={{ marginBottom:10 }}>
+          {editId === v.id ? (
+            <div>
+              <Input label="品类名称" value={editForm.name} onChange={val => setEditForm(f => ({ ...f, name: val }))} />
+              <Input label="价格（¥/kg）" type="number" value={editForm.price_per_kg} onChange={val => setEditForm(f => ({ ...f, price_per_kg: val }))} />
+              <Input label={`当前库存（${v.unit}）`} type="number" value={editForm.current_stock} onChange={val => setEditForm(f => ({ ...f, current_stock: val }))} />
+              <div style={{ display:"flex", gap:10 }}>
+                <Btn color={C.accent} onClick={() => saveEdit(v.id)}>保存</Btn>
+                <Btn color={C.hover} onClick={() => setEditId(null)} style={{ color:C.sub }}>取消</Btn>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer" }}
+              onClick={() => { setEditId(v.id); setEditForm({ name: v.name, price_per_kg: String(v.price_per_kg), current_stock: String(v.current_stock || 0) }); }}>
+              <div>
+                <span style={{ color:C.sub, fontSize:11 }}>{v.material_name} / </span>
+                <span style={{ fontWeight:600 }}>{v.name}</span>
+              </div>
+              <div style={{ textAlign:"right" }}>
+                <div style={{ color:C.accent, fontWeight:600, fontSize:14 }}>{fmt.money(v.price_per_kg)}/kg</div>
+                <div style={{ color:C.sub, fontSize:12 }}>库存: {(v.current_stock||0).toFixed(0)}{v.unit}</div>
+              </div>
+            </div>
+          )}
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+
+// ── 5f: 日志归档 ──
+
+function ArchiveManager() {
+  const [archives, setArchives] = useState([]);
+  const [orders, setOrders]     = useState([]);
+  const [viewArch, setViewArch] = useState(null);
+  const [form, setForm]         = useState({ start_date: "", end_date: "", label: "" });
+  const [toast, setToast]       = useState(null);
+  const [refresh, setRefresh]   = useState(0);
+
+  useEffect(() => {
+    Promise.all([api.getArchives(), api.getOrders({ limit: 30 })])
+      .then(([a, o]) => { setArchives(a); setOrders(o); });
+  }, [refresh]);
+
+  const handleArchive = async () => {
+    if (!form.start_date || !form.end_date) return;
+    try {
+      await api.createArchive(form);
+      setToast("归档成功！"); setTimeout(() => setToast(null), 1500);
+      setForm({ start_date: "", end_date: "", label: "" });
+      setRefresh(r => r + 1);
+    } catch (e) { setToast(e.message); setTimeout(() => setToast(null), 2000); }
+  };
+
+  const openArchive = async (id) => {
+    const data = await api.getArchive(id);
+    setViewArch(data);
+  };
+
+  if (viewArch) {
+    return (
+      <div>
+        <TopBar title={viewArch.label} onBack={() => setViewArch(null)} />
+        <div style={{ padding:20 }}>
+          <div style={{ color:C.sub, fontSize:12, marginBottom:16 }}>
+            {viewArch.start_date} ~ {viewArch.end_date} · 共{viewArch.order_count}单 · 售卖{viewArch.sale_count}单 · 内部{viewArch.internal_count}单
+          </div>
+          <div style={{ display:"flex", gap:12, marginBottom:20 }}>
+            <Card style={{ flex:1 }}><div style={{ fontSize:11, color:C.sub }}>收入</div><div style={{ fontSize:20, fontWeight:700, color:C.sale }}>{fmt.money(viewArch.total_revenue)}</div></Card>
+            <Card style={{ flex:1 }}><div style={{ fontSize:11, color:C.sub }}>成本</div><div style={{ fontSize:20, fontWeight:700, color:C.accent }}>{fmt.money(viewArch.total_cost)}</div></Card>
+          </div>
+          {(viewArch.snapshot || []).map(t => <OrderCard key={t.id} t={t} />)}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding:20 }}>
+      <Toast message={toast} type={toast==="归档成功！"?"success":"error"} />
+      <Card style={{ marginBottom:20 }}>
+        <div style={{ fontSize:14, fontWeight:600, marginBottom:14 }}>创建归档</div>
+        <div style={{ display:"flex", gap:10, marginBottom:12 }}>
+          <Input label="开始日期" type="date" value={form.start_date} onChange={v => setForm(f => ({ ...f, start_date: v }))} style={{ flex:1, marginBottom:0 }} />
+          <Input label="结束日期" type="date" value={form.end_date} onChange={v => setForm(f => ({ ...f, end_date: v }))} style={{ flex:1, marginBottom:0 }} />
+        </div>
+        <Input label="归档标签（可选）" value={form.label} onChange={v => setForm(f => ({ ...f, label: v }))} placeholder="例如：第3周营业记录" />
+        <Btn full color={C.accent} onClick={handleArchive}>归档该时间段记录</Btn>
+      </Card>
+
+      {archives.length > 0 && <>
+        <div style={{ fontSize:14, fontWeight:600, marginBottom:12 }}>📁 历史归档</div>
+        {archives.map(a => (
+          <Card key={a.id} onClick={() => openArchive(a.id)} style={{ marginBottom:8, cursor:"pointer" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <div style={{ fontWeight:600, fontSize:14 }}>{a.label}</div>
+                <div style={{ color:C.muted, fontSize:11 }}>{a.start_date} ~ {a.end_date}</div>
+              </div>
+              <div style={{ textAlign:"right" }}>
+                <span style={{ color:C.accent, fontWeight:700, fontSize:14 }}>{a.order_count} 单</span>
+                <div style={{ color:C.sub, fontSize:11 }}>{fmt.money(a.total_revenue)}</div>
+              </div>
+            </div>
+          </Card>
+        ))}
+      </>}
+
+      <div style={{ fontSize:14, fontWeight:600, marginTop:20, marginBottom:12 }}>📋 近期记录</div>
+      {orders.length === 0 ? <Empty text="暂无记录" /> : orders.map(t => <OrderCard key={t.id} t={t} />)}
+    </div>
+  );
+}
+
+function OrderCard({ t }) {
+  return (
+    <Card style={{ marginBottom:8 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+        <div>
+          <span style={{ fontSize:12, fontWeight:700, padding:"2px 8px", borderRadius:4,
+            color: t.type==="sale"?C.sale:C.internal,
+            background: t.type==="sale"?C.saleDim:C.internalDim
+          }}>{t.type==="sale"?"售卖":"内部"}</span>
+          <span style={{ fontWeight:600, marginLeft:10, fontSize:14 }}>{t.drink_name||"自定义"}</span>
+          {t.operator_name && <span style={{ color:C.muted, fontSize:11, marginLeft:10 }}>by {t.operator_name}</span>}
+        </div>
+        <div style={{ textAlign:"right" }}>
+          {t.drink_price > 0 && <div style={{ color:C.sale, fontWeight:700 }}>{fmt.money(t.drink_price)}</div>}
+          <div style={{ color:C.muted, fontSize:11 }}>{fmt.date(t.created_at)}</div>
+        </div>
+      </div>
+      {t.notes && t.notes.length > 0 && (
+        <div style={{ marginTop:6, display:"flex", gap:6, flexWrap:"wrap" }}>
+          {(Array.isArray(t.notes) ? t.notes : []).map((n, i) => (
+            <span key={i} style={{ fontSize:10, padding:"2px 8px", borderRadius:4, background:C.accentDim, color:C.accent }}>{n}</span>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+
+/* ╔═══════════════════════════════════════════════════════════╗
+   ║  SECTION 6 — 管理页面容器                                 ║
+   ╚═══════════════════════════════════════════════════════════╝ */
+
+function ManagementPage({ onBack }) {
+  const [tab, setTab] = useState("dashboard");
+  const tabs = [
+    {id:"dashboard",label:"数据统计"}, {id:"menu",label:"菜单管理"},
+    {id:"staff",label:"人员/备注"}, {id:"inventory",label:"库存管理"},
+    {id:"check",label:"查库"}, {id:"archive",label:"日志归档"},
+  ];
+
+  return (
+    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
+      <TopBar title="管理中心" onBack={onBack} />
+      <TabBar tabs={tabs} active={tab} onChange={setTab} />
+      <div style={{ flex:1, overflowY:"auto" }}>
+        {tab === "dashboard" && <Dashboard />}
+        {tab === "menu"      && <MenuEditor />}
+        {tab === "staff"     && <StaffEditor />}
+        {tab === "inventory" && <InventoryManager />}
+        {tab === "check"     && <CheckInventory />}
+        {tab === "archive"   && <ArchiveManager />}
+      </div>
+    </div>
+  );
+}
+
+
+/* ╔═══════════════════════════════════════════════════════════╗
+   ║  SECTION 7 — 主应用入口                                   ║
+   ╚═══════════════════════════════════════════════════════════╝ */
+
+function App() {
+  const [page, setPage] = useState("home");
+
+  return (
+    <div style={{ height:"100vh", overflow:"hidden", display:"flex", flexDirection:"column" }}>
+      {page === "home" && (
+        <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:32, gap:12 }}>
+          <div style={{ fontSize:56, marginBottom:8 }}>☕</div>
+          <div style={{ fontSize:26, fontWeight:800, letterSpacing:-1 }}>咖啡社团管理系统</div>
+          <div style={{ fontSize:13, color:C.muted, marginBottom:32 }}>Coffee Club Management System</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:16, width:"100%", maxWidth:400 }}>
+            <Btn size="xl" color={C.sale} full onClick={() => setPage("sale")}>☕ 售卖</Btn>
+            <Btn size="xl" color={C.internal} full onClick={() => setPage("internal")}>🏠 内部消耗</Btn>
+            <Btn size="xl" color={C.card} full onClick={() => setPage("manage")} style={{ border:`2px solid ${C.border}`, color:C.sub }}>⚙ 管理</Btn>
+          </div>
+          <div style={{ marginTop:32, fontSize:10, color:C.muted }}>v2.0 · Flask + SQLite · 前后端分离</div>
+        </div>
+      )}
+      {page === "sale"     && <OrderFlow type="sale" onBack={() => setPage("home")} />}
+      {page === "internal" && <OrderFlow type="internal" onBack={() => setPage("home")} />}
+      {page === "manage"   && <ManagementPage onBack={() => setPage("home")} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
