@@ -101,6 +101,7 @@ const api = {
   getStock:      ()       => api.get("/inventory/stock"),
   restock:       (d)      => api.post("/inventory/restock", d),
   getRecords:    ()       => api.get("/inventory/records"),
+  deleteRecord:  (id)     => api.del(`/inventory/records/${id}`),
   quickEdit:     (id, d)  => api.put(`/inventory/quick-edit/${id}`, d),
 
   // ── Stats ──
@@ -228,6 +229,7 @@ function GridSelect({ items, selected, onSelect, columns=3, renderItem }) {
             borderRadius:14, padding:"16px 12px", textAlign:"center", cursor:"pointer",
             color: active?C.accent:C.text, fontSize:16, fontWeight: active?700:500,
             minHeight:60, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:4,
+            whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
           }}>
             {renderItem ? renderItem(item, active) : item.name || item.label}
           </div>
@@ -258,20 +260,17 @@ function Empty({ text="暂无数据" }) {
 
 
 /* ╔═══════════════════════════════════════════════════════════╗
-   ║  SECTION 4 — 下单流程 (售卖 & 内部消耗 共用)              ║
+   ║  SECTION 4 — 点单流程                                     ║
    ╚═══════════════════════════════════════════════════════════╝ */
 
-function OrderFlow({ type, onBack }) {
-  const [step, setStep] = useState(0);
-  const [mode, setMode] = useState(null);
+function OrderFlow({ onBack }) {
+  const [step, setStep] = useState("menu");
   const [drinks, setDrinks]       = useState([]);
-  const [materials, setMaterials] = useState([]);
   const [variants, setVariants]   = useState([]);
   const [operators, setOperators] = useState([]);
   const [notes, setNotes]         = useState([]);
   const [loading, setLoading]     = useState(true);
 
-  // Order state
   const [selectedDrink, setSelectedDrink] = useState(null);
   const [items, setItems]                 = useState([]);
   const [operatorId, setOperatorId]       = useState(null);
@@ -279,65 +278,73 @@ function OrderFlow({ type, onBack }) {
   const [customNote, setCustomNote]       = useState("");
   const [toast, setToast]                 = useState(null);
 
-  // Custom input
-  const [cMatId, setCMatId]     = useState(null);
-  const [cVarId, setCVarId]     = useState(null);
-  const [cAmount, setCAmount]   = useState("");
-
-  const isSale = type === "sale";
-  const color  = isSale ? C.sale : C.internal;
-  const label  = isSale ? "售卖" : "内部消耗";
-
   useEffect(() => {
-    Promise.all([api.getDrinks(), api.getMaterials(), api.getVariants(), api.getOperators(), api.getNotes()])
-      .then(([d, m, v, o, n]) => { setDrinks(d); setMaterials(m); setVariants(v); setOperators(o); setNotes(n); setLoading(false); })
+    Promise.all([api.getDrinks(), api.getVariants(), api.getOperators(), api.getNotes()])
+      .then(([d, v, o, n]) => { setDrinks(d); setVariants(v); setOperators(o); setNotes(n); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
 
   const variantsOf = useCallback((matId) => variants.filter(v => v.material_id === matId), [variants]);
   const findVar    = useCallback((vid) => variants.find(v => v.id === vid), [variants]);
-  const findMat    = useCallback((mid) => materials.find(m => m.id === mid), [materials]);
   const findOp     = useCallback((oid) => operators.find(o => o.id === oid), [operators]);
 
+  const drinkMenu = useMemo(() => drinks, [drinks]);
+
   const calcCost = (variant, amount) => variant ? (variant.price_per_kg / 1000) * amount : 0;
-  const totalCost = useMemo(() => items.reduce((s, i) => s + calcCost(findVar(i.variant_id), i.amount), 0), [items, findVar]);
 
   const selectDrink = (drinkId) => {
-    const drink = drinks.find(d => d.id === drinkId);
+    const drink = drinkMenu.find(d => d.id === drinkId);
     if (!drink) return;
-    setSelectedDrink(drink);
-    const drinkItems = drink.recipe.map(r => ({
-      material_id: r.material_id, variant_id: r.default_variant_id, amount: r.amount,
-      material_name: r.material_name, variant_name: r.variant_name, unit: r.unit || "g",
-    }));
-    setItems(drinkItems);
-    setStep(2);
-  };
 
-  const addCustomItem = () => {
-    if (!cMatId || !cVarId || !cAmount || Number(cAmount) <= 0) return;
-    const mat = findMat(cMatId), v = findVar(cVarId);
-    setItems(p => [...p, { material_id: cMatId, variant_id: cVarId, amount: Number(cAmount), material_name: mat?.name, variant_name: v?.name, unit: v?.unit || "g" }]);
-    setCMatId(null); setCVarId(null); setCAmount("");
+    const drinkItems = (drink.recipe || []).map(r => ({
+      material_id: r.material_id,
+      variant_id: r.default_variant_id,
+      amount: r.amount,
+      material_name: r.material_name,
+      variant_name: r.variant_name,
+      unit: r.unit || "g",
+    }));
+    setSelectedDrink(drink);
+    setItems(drinkItems);
+
+    setSelectedNotes([]);
+    setCustomNote("");
+    setStep("detail");
   };
 
   const updateItemVariant = (idx, vid) => {
     const v = findVar(vid);
     setItems(p => p.map((it, i) => i === idx ? { ...it, variant_id: vid, variant_name: v?.name, unit: v?.unit } : it));
   };
+
   const updateItemAmount = (idx, amount) => setItems(p => p.map((it, i) => i === idx ? { ...it, amount: Number(amount) || 0 } : it));
   const removeItem = (idx) => setItems(p => p.filter((_, i) => i !== idx));
   const toggleNote = (nid) => setSelectedNotes(p => p.includes(nid) ? p.filter(x => x !== nid) : [...p, nid]);
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (orderType) => {
+    if (!selectedDrink || items.length === 0) {
+      setToast("请先选择饮品并配置材料");
+      setTimeout(() => setToast(null), 1800);
+      return;
+    }
+
     try {
       const noteLabels = selectedNotes.map(nid => notes.find(n => n.id === nid)?.label).filter(Boolean);
       if (customNote.trim()) noteLabels.push(customNote.trim());
+
       await api.createOrder({
-        type, mode, drink_id: selectedDrink?.id, drink_name: selectedDrink?.name, drink_price: selectedDrink?.price || 0,
-        operator_id: operatorId, operator_name: findOp(operatorId)?.name, notes: noteLabels, items,
+        type: orderType,
+        mode: "drink",
+        drink_id: selectedDrink.id,
+        drink_name: selectedDrink.name,
+        drink_price: selectedDrink.price || 0,
+        operator_id: operatorId,
+        operator_name: findOp(operatorId)?.name,
+        notes: noteLabels,
+        items,
       });
-      setToast("✓ 记录成功！");
+
+      setToast(orderType === "sale" ? "✓ 点单成功" : "✓ 内部消耗已记录");
       setTimeout(() => { setToast(null); onBack(); }, 1200);
     } catch (e) {
       setToast("✗ " + e.message);
@@ -345,163 +352,88 @@ function OrderFlow({ type, onBack }) {
     }
   };
 
-  if (loading) return <><TopBar title={label} onBack={onBack} /><Loading /></>;
+  if (loading) return <><TopBar title="点单" onBack={onBack} /><Loading /></>;
 
-  // ── Step 0: 选择模式 ──
-  if (step === 0) return (
-    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
-      <TopBar title={label} onBack={onBack} /><Toast message={toast} />
-      <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:24, padding:32 }}>
-        <div style={{ fontSize:14, color:C.sub }}>选择录入方式</div>
-        <Btn size="xl" color={color} full onClick={() => { setMode("drink"); setStep(1); }}>☕ 选择饮品</Btn>
-        <Btn size="xl" color={C.hover} full onClick={() => { setMode("custom"); setStep(1); }} style={{ border:`2px solid ${C.border}`, color:C.text }}>⚗ 自定义原材料</Btn>
+  if (step === "menu") {
+    return (
+      <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
+        <TopBar title="点单 · 选择饮品" onBack={onBack} />
+        <div style={{ flex:1, padding:20, overflowY:"auto" }}>
+          <GridSelect items={drinkMenu} selected={selectedDrink?.id} columns={3} onSelect={selectDrink}
+            renderItem={(d, active) => (
+              <>
+                <span style={{ fontSize:17 }}>{d.name}</span>
+                <span style={{ fontSize:12, color:C.sub }}>{fmt.money(d.price)}</span>
+              </>
+            )} />
+        </div>
       </div>
-    </div>
-  );
+    );
+  }
 
-  // ── Step 1a: 选择饮品 ──
-  if (step === 1 && mode === "drink") return (
-    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
-      <TopBar title="选择饮品" onBack={() => setStep(0)} />
-      <div style={{ flex:1, padding:20, overflowY:"auto" }}>
-        <GridSelect items={drinks} selected={null} columns={3} onSelect={selectDrink}
-          renderItem={(d) => <><span style={{ fontSize:17 }}>{d.name}</span><span style={{ fontSize:12, color:C.sub }}>{fmt.money(d.price)}</span></>} />
-      </div>
-    </div>
-  );
-
-  // ── Step 1b: 自定义原材料 ──
-  if (step === 1 && mode === "custom") return (
-    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
-      <TopBar title="自定义原材料" onBack={() => setStep(0)} />
-      <div style={{ flex:1, padding:20, overflowY:"auto" }}>
-        {items.length > 0 && (
-          <Card style={{ marginBottom:16 }}>
-            <div style={{ fontSize:12, color:C.sub, marginBottom:10 }}>已添加：</div>
-            {items.map((it, i) => (
-              <div key={i} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"8px 0", borderBottom: i<items.length-1?`1px solid ${C.border}`:"none" }}>
-                <span style={{ color:C.text, fontSize:14 }}>{it.material_name} / {it.variant_name} — {it.amount}{it.unit}</span>
-                <span onClick={()=>removeItem(i)} style={{ color:C.danger, cursor:"pointer", padding:"4px 10px" }}>✕</span>
-              </div>
-            ))}
-          </Card>
-        )}
-        <div style={{ fontSize:13, color:C.sub, marginBottom:10 }}>选择原材料：</div>
-        <GridSelect items={materials} selected={cMatId} columns={3} onSelect={id => { setCMatId(id); setCVarId(null); }} />
-        {cMatId && <>
-          <div style={{ fontSize:13, color:C.sub, marginTop:16, marginBottom:10 }}>选择品类：</div>
-          <GridSelect items={variantsOf(cMatId)} selected={cVarId} columns={2} onSelect={setCVarId}
-            renderItem={v => <><span>{v.name}</span><span style={{ fontSize:11, color:C.sub }}>{fmt.money(v.price_per_kg)}/kg</span></>} />
-        </>}
-        {cVarId && (
-          <div style={{ marginTop:16, display:"flex", gap:12, alignItems:"flex-end" }}>
-            <Input label={`用量 (${findVar(cVarId)?.unit||"g"})`} type="number" value={cAmount} onChange={setCAmount} style={{ flex:1, marginBottom:0 }} />
-            <Btn color={color} onClick={addCustomItem} style={{ height:48 }}>添加</Btn>
-          </div>
-        )}
-        {items.length > 0 && <div style={{ marginTop:24 }}><Btn color={color} full size="lg" onClick={()=>setStep(3)}>下一步 → 操作人</Btn></div>}
-      </div>
-    </div>
-  );
-
-  // ── Step 2: 确认配方（饮品模式） ──
-  if (step === 2) return (
-    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
-      <TopBar title={`${selectedDrink?.name} — 确认配方`} onBack={() => { setStep(1); setItems([]); setSelectedDrink(null); }} />
-      <div style={{ flex:1, padding:20, overflowY:"auto" }}>
-        {items.map((it, idx) => {
-          const vs = variantsOf(it.material_id);
-          return (
-            <Card key={idx} style={{ marginBottom:14 }}>
-              <div style={{ fontSize:13, color:C.sub, marginBottom:10 }}>{it.material_name}</div>
-              <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:12 }}>
-                {vs.map(v => (
-                  <div key={v.id} onClick={()=>updateItemVariant(idx, v.id)} style={{
-                    ...btnBase, padding:"10px 16px", borderRadius:10, cursor:"pointer", fontSize:13,
-                    background: it.variant_id===v.id?C.accentDim:C.bg, border:`1.5px solid ${it.variant_id===v.id?C.accent:C.border}`,
-                    color: it.variant_id===v.id?C.accent:C.text,
-                  }}>{v.name}</div>
-                ))}
-              </div>
-              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                <span style={{ color:C.sub, fontSize:12 }}>用量:</span>
-                <input type="number" value={it.amount} onChange={e=>updateItemAmount(idx, e.target.value)}
-                  style={{ width:80, padding:"8px 12px", background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:15, textAlign:"center" }} />
-                <span style={{ color:C.muted, fontSize:12 }}>{findVar(it.variant_id)?.unit||"g"}</span>
-              </div>
-            </Card>
-          );
-        })}
-        <Btn color={color} full size="lg" onClick={()=>setStep(3)}>下一步 → 操作人</Btn>
-      </div>
-    </div>
-  );
-
-  // ── Step 3: 选择操作人 ──
-  if (step === 3) return (
-    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
-      <TopBar title="选择操作人" onBack={()=>setStep(mode==="drink"?2:1)} />
-      <div style={{ flex:1, padding:20, display:"flex", flexDirection:"column" }}>
-        <GridSelect items={operators} selected={operatorId} columns={3} onSelect={setOperatorId}
-          renderItem={o => <span style={{ fontSize:19 }}>{o.name}</span>} />
-        {operatorId && <div style={{ marginTop:"auto", paddingTop:24 }}><Btn color={color} full size="lg" onClick={()=>setStep(4)}>下一步 → 备注</Btn></div>}
-      </div>
-    </div>
-  );
-
-  // ── Step 4: 备注 ──
-  if (step === 4) return (
-    <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
-      <TopBar title="特殊备注（可选）" onBack={()=>setStep(3)} />
-      <div style={{ flex:1, padding:20 }}>
-        <GridSelect items={notes} selected={selectedNotes} columns={3} onSelect={toggleNote} />
-        <Input label="自定义备注" value={customNote} onChange={setCustomNote} placeholder="输入自定义备注…" style={{ marginTop:16 }} />
-        <div style={{ marginTop:24 }}><Btn color={color} full size="lg" onClick={()=>setStep(5)}>确认订单</Btn></div>
-      </div>
-    </div>
-  );
-
-  // ── Step 5: 确认提交 ──
   return (
     <div style={{ height:"100%", display:"flex", flexDirection:"column" }}>
-      <TopBar title="确认提交" onBack={()=>setStep(4)} /><Toast message={toast} type={toast?.startsWith("✗")?"error":"success"} />
+      <TopBar title={`${selectedDrink?.name || "点单"} · 详情`} onBack={() => setStep("menu")} />
+      <Toast message={toast} type={toast?.startsWith("✗")?"error":"success"} />
       <div style={{ flex:1, padding:20, overflowY:"auto" }}>
         <Card style={{ marginBottom:16 }}>
-          <Row label="类型" value={<span style={{ color:isSale?C.sale:C.internal, fontWeight:700 }}>{label}</span>} />
-          {selectedDrink && <Row label="饮品" value={`${selectedDrink.name}（${fmt.money(selectedDrink.price)}）`} />}
-          <Row label="操作人" value={findOp(operatorId)?.name} />
-          {(selectedNotes.length > 0 || customNote) && (
-            <Row label="备注" value={<span style={{ color:C.accent }}>{[...selectedNotes.map(nid=>notes.find(n=>n.id===nid)?.label), customNote].filter(Boolean).join("、")}</span>} />
-          )}
+          <div style={{ fontSize:13, color:C.sub, marginBottom:12 }}>材料选项</div>
+          {items.length === 0 && <Empty text="当前未添加任何材料" />}
+          {items.map((it, idx) => {
+            const vs = variantsOf(it.material_id);
+            return (
+              <div key={idx} style={{ paddingBottom:14, marginBottom:14, borderBottom: idx<items.length-1?`1px solid ${C.border}`:"none" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                  <span style={{ fontSize:14, color:C.text, fontWeight:600 }}>{it.material_name}</span>
+                  <span onClick={()=>removeItem(idx)} style={{ color:C.danger, cursor:"pointer", padding:"2px 8px", fontSize:13 }}>删除</span>
+                </div>
+                <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:10 }}>
+                  {vs.map(v => (
+                    <div key={v.id} onClick={()=>updateItemVariant(idx, v.id)} style={{
+                      ...btnBase,
+                      padding:"8px 12px",
+                      borderRadius:10,
+                      cursor:"pointer",
+                      fontSize:12,
+                      background: it.variant_id===v.id?C.accentDim:C.bg,
+                      border:`1.5px solid ${it.variant_id===v.id?C.accent:C.border}`,
+                      color: it.variant_id===v.id?C.accent:C.text,
+                      whiteSpace:"nowrap",
+                    }}>{v.name}</div>
+                  ))}
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                  <span style={{ color:C.sub, fontSize:12 }}>用量</span>
+                  <input type="number" value={it.amount} onChange={e=>updateItemAmount(idx, e.target.value)}
+                    style={{ width:96, padding:"8px 10px", background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:14, textAlign:"center" }} />
+                  <span style={{ color:C.muted, fontSize:12 }}>{findVar(it.variant_id)?.unit || "g"}</span>
+                  <span style={{ marginLeft:"auto", color:C.sub, fontSize:12 }}>≈ {fmt.money(calcCost(findVar(it.variant_id), it.amount))}</span>
+                </div>
+              </div>
+            );
+          })}
         </Card>
+
         <Card style={{ marginBottom:16 }}>
-          <div style={{ fontSize:13, color:C.sub, marginBottom:10 }}>原材料消耗明细</div>
-          {items.map((it, i) => (
-            <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom: i<items.length-1?`1px solid ${C.border}`:"none", fontSize:14 }}>
-              <span style={{ color:C.text }}>{it.material_name} / {it.variant_name}</span>
-              <span style={{ color:C.sub }}>{it.amount}{it.unit} ≈ {fmt.money(calcCost(findVar(it.variant_id), it.amount))}</span>
-            </div>
-          ))}
-          <div style={{ display:"flex", justifyContent:"space-between", marginTop:12, paddingTop:12, borderTop:`1px solid ${C.border}` }}>
-            <span style={{ fontWeight:700 }}>原材料成本</span>
-            <span style={{ color:C.accent, fontWeight:700, fontSize:18 }}>{fmt.money(totalCost)}</span>
-          </div>
+          <div style={{ fontSize:13, color:C.sub, marginBottom:10 }}>特殊备注</div>
+          <GridSelect items={notes} selected={selectedNotes} columns={3} onSelect={toggleNote} />
+          <Input label="自定义备注" value={customNote} onChange={setCustomNote} placeholder="输入自定义备注…" style={{ marginTop:16 }} />
         </Card>
-        <Btn color={color} full size="lg" onClick={handleSubmit}>✓ 提交记录</Btn>
+
+        <Card style={{ marginBottom:16 }}>
+          <div style={{ fontSize:13, color:C.sub, marginBottom:10 }}>操作人（可选）</div>
+          <GridSelect items={operators} selected={operatorId} columns={3} onSelect={setOperatorId}
+            renderItem={o => <span style={{ fontSize:16, whiteSpace:"nowrap" }}>{o.name}</span>} />
+        </Card>
+
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, paddingBottom:16 }}>
+          <Btn color={C.sale} size="lg" onClick={() => handleSubmit("sale")} disabled={!selectedDrink || items.length===0}>点单</Btn>
+          <Btn color={C.internal} size="lg" onClick={() => handleSubmit("internal")} disabled={!selectedDrink || items.length===0}>内部消耗</Btn>
+        </div>
       </div>
     </div>
   );
 }
-
-function Row({ label, value }) {
-  return (
-    <div style={{ display:"flex", justifyContent:"space-between", marginBottom:10 }}>
-      <span style={{ color:C.sub, fontSize:14 }}>{label}</span>
-      <span style={{ color:C.text, fontWeight:600, fontSize:14 }}>{value}</span>
-    </div>
-  );
-}
-
 
 /* ╔═══════════════════════════════════════════════════════════╗
    ║  SECTION 5 — 管理页面组件                                 ║
@@ -865,6 +797,19 @@ function InventoryManager() {
     } catch (e) { setToast("错误：" + e.message); setTimeout(() => setToast(null), 2000); }
   };
 
+  const handleDeleteRecord = async (record) => {
+    if (!window.confirm(`确认删除入库记录：${record.material_name} / ${record.variant_name} +${record.quantity}？`)) return;
+    try {
+      await api.deleteRecord(record.id);
+      setToast("记录已删除");
+      setTimeout(() => setToast(null), 1500);
+      setRefresh(r => r + 1);
+    } catch (e) {
+      setToast("错误：" + e.message);
+      setTimeout(() => setToast(null), 2000);
+    }
+  };
+
   // Group stock by material
   const grouped = useMemo(() => {
     const map = {};
@@ -891,6 +836,9 @@ function InventoryManager() {
                   <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}>
                     <span style={{ fontWeight:600, fontSize:14 }}>{v.name}</span>
                     <span style={{ color:low?C.danger:C.text, fontWeight:700 }}>{(v.current_stock||0).toFixed(0)} {v.unit}</span>
+                  </div>
+                  <div style={{ color:C.muted, fontSize:11, marginBottom:8 }}>
+                    最近入库：{v.last_restock_at ? fmt.dateFull(v.last_restock_at) : "暂无"}
                   </div>
                   <div style={{ height:5, background:C.bg, borderRadius:3, overflow:"hidden" }}>
                     <div style={{ height:"100%", width:`${Math.min(pct,100)}%`, background:low?C.danger:C.sale, borderRadius:3, transition:"width 0.3s" }} />
@@ -923,11 +871,12 @@ function InventoryManager() {
             <Card key={r.id} style={{ marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
               <div>
                 <div style={{ fontWeight:500, fontSize:14 }}>{r.material_name} / {r.variant_name}</div>
-                <div style={{ color:C.muted, fontSize:11 }}>{fmt.dateFull(r.created_at)}</div>
+                <div style={{ color:C.muted, fontSize:11 }}>入库时间：{fmt.dateFull(r.created_at)}</div>
               </div>
-              <div style={{ textAlign:"right" }}>
+              <div style={{ textAlign:"right", display:"flex", flexDirection:"column", alignItems:"flex-end", gap:6 }}>
                 <div style={{ color:C.sale, fontWeight:700 }}>+{r.quantity}</div>
                 {r.unit_price > 0 && <div style={{ color:C.sub, fontSize:11 }}>{fmt.money(r.unit_price)}</div>}
+                <Btn size="sm" color={C.dangerDim} onClick={() => handleDeleteRecord(r)} style={{ color:C.danger }}>删除记录</Btn>
               </div>
             </Card>
           ))}
@@ -1154,15 +1103,13 @@ function App() {
           <div style={{ fontSize:26, fontWeight:800, letterSpacing:-1 }}>咖啡社团管理系统</div>
           <div style={{ fontSize:13, color:C.muted, marginBottom:32 }}>Coffee Club Management System</div>
           <div style={{ display:"flex", flexDirection:"column", gap:16, width:"100%", maxWidth:400 }}>
-            <Btn size="xl" color={C.sale} full onClick={() => setPage("sale")}>☕ 售卖</Btn>
-            <Btn size="xl" color={C.internal} full onClick={() => setPage("internal")}>🏠 内部消耗</Btn>
+            <Btn size="xl" color={C.sale} full onClick={() => setPage("order")}>🧾 点单</Btn>
             <Btn size="xl" color={C.card} full onClick={() => setPage("manage")} style={{ border:`2px solid ${C.border}`, color:C.sub }}>⚙ 管理</Btn>
           </div>
           <div style={{ marginTop:32, fontSize:10, color:C.muted }}>v2.0 · Flask + SQLite · 前后端分离</div>
         </div>
       )}
-      {page === "sale"     && <OrderFlow type="sale" onBack={() => setPage("home")} />}
-      {page === "internal" && <OrderFlow type="internal" onBack={() => setPage("home")} />}
+      {page === "order"    && <OrderFlow onBack={() => setPage("home")} />}
       {page === "manage"   && <ManagementPage onBack={() => setPage("home")} />}
     </div>
   );

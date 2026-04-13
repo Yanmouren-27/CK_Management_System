@@ -15,7 +15,10 @@ def get_stock():
     """获取所有品类的当前库存，按原材料分组"""
     rows = query(
         """SELECT v.id, v.name, v.material_id, m.name AS material_name,
-                  v.price_per_kg, v.unit, v.current_stock, v.total_stocked
+                  v.price_per_kg, v.unit, v.current_stock, v.total_stocked,
+                  (SELECT MAX(ir.created_at)
+                   FROM inventory_records ir
+                   WHERE ir.variant_id = v.id) AS last_restock_at
            FROM variants v
            JOIN materials m ON v.material_id = m.id
            ORDER BY m.sort_order, v.id"""
@@ -61,6 +64,30 @@ def list_records():
         (limit,),
     )
     return jsonify(rows)
+
+
+@bp.delete("/records/<int:rid>")
+def delete_record(rid):
+    """删除一条入库记录，并回滚对应库存累计值"""
+    record = query(
+        "SELECT * FROM inventory_records WHERE id=?",
+        (rid,),
+        one=True,
+    )
+    if not record:
+        return jsonify({"error": "记录不存在"}), 404
+
+    with get_db() as conn:
+        conn.execute(
+            """UPDATE variants
+               SET current_stock = MAX(0, current_stock - ?),
+                   total_stocked = MAX(0, total_stocked - ?)
+               WHERE id = ?""",
+            (record["quantity"], record["quantity"], record["variant_id"]),
+        )
+        conn.execute("DELETE FROM inventory_records WHERE id=?", (rid,))
+
+    return jsonify({"ok": True})
 
 
 @bp.put("/quick-edit/<int:vid>")
